@@ -17,7 +17,7 @@ avoiding dynamic dispatch in common cases.
 """
 @generated function isequal_somescalar(a, b)
     @nospecialize a b
-    
+
     expr = Expr(:if)
     cur_expr = expr
 
@@ -30,7 +30,7 @@ avoiding dynamic dispatch in common cases.
         push!(cur_expr.args, new_expr)
         cur_expr = new_expr
     end
-    
+
     push!(cur_expr.args, :(isequal(a, b)::Bool))
     quote
         @nospecialize a b
@@ -71,7 +71,6 @@ the keys are hashed with `full=false` but the current comparison is with `full=t
 allows avoiding repeatedly accessing a `TaskLocalValue`, which can be slow.
 """
 function isequal_rangesdict(d1::RangesT{T}, d2::RangesT{T}, full) where {T}
-    full || return isequal(d1, d2)
     length(d1) == length(d2) || return false
     for (k, v) in d1
         k2 = nothing
@@ -81,7 +80,8 @@ function isequal_rangesdict(d1::RangesT{T}, d2::RangesT{T}, full) where {T}
             k2 === nothing && return false
             v2 = d2[k2]
         end true
-        isequal(v, v2) && isequal_bsimpl(k, k2, true) || return false
+        isequal(v, v2) || return false
+        full && (isequal_bsimpl(k, k2, true) || return false)
     end
     return true
 end
@@ -118,7 +118,7 @@ function metadata_isequal(m1::MetadataT, m2::MetadataT)
     return metadata_isequal_metadict(m1, m2)
 end
 
-function metadata_isequal(m1, m2)
+function metadata_isequal(m1, m2)::Bool
     @nospecialize m1 m2
     typeof(m1) === typeof(m2) || return false
     if m1 isa BasicSymbolic{SymReal} && m2 isa BasicSymbolic{SymReal}
@@ -156,12 +156,35 @@ function metadata_isequal(m1, m2)
     end
 end
 
+# Less vulnerable to invalidations compared to r1 == r2 / Base.hash(regions).
+function isequal_regions(r1::RegionsT, r2::RegionsT)
+    length(r1) == length(r2) || return false
+    for i in eachindex(r1, r2)
+        @inbounds r1[i] === r2[i] || return false
+    end
+    return true
+end
+
+function hash_regions(r::RegionsT, h::UInt)
+    h = hash(length(r), h)
+    for i in eachindex(r)
+        @inbounds ri = r[i]
+        for j in eachindex(ri)
+            @inbounds h = hash(ri[j], h)
+        end
+    end
+    return h
+end
+
 function isequal_shapes(@nospecialize(sh1::ShapeT), @nospecialize(sh2::ShapeT))
     if sh1 isa Unknown && sh2 isa Unknown
         return sh1.ndims == sh2.ndims
     elseif sh1 isa ShapeVecT && sh2 isa ShapeVecT
         length(sh1) == length(sh2) || return false
-        return @union_split_smallvec sh1 @union_split_smallvec sh2 all(splat(isequal), zip(sh1, sh2))
+        for i in eachindex(sh1, sh2)
+            @inbounds sh1[i] === sh2[i] || return false
+        end
+        return true
     end
     return false
 end
@@ -206,7 +229,7 @@ function isequal_bsimpl(a::BSImpl.Type{T}, b::BSImpl.Type{T}, full::Bool) where 
             isequal(o1, o2) && isequal(e1, e2) && isequal(f1, f2)::Bool && isequal(t1, t2) && isequal_rangesdict(r1, r2, full) && isequal_shapes(s1, s2) && type1 === type2
         end
         (BSImpl.ArrayMaker(; regions = r1, values = v1, shape = s1, type = t1), BSImpl.ArrayMaker(; regions = r2, values = v2, shape = s2, type = t2)) => begin
-            r1 == r2 && isequal_argsvec(v1, v2, full) && isequal_shapes(s1, s2) && t1 === t2
+            isequal_regions(r1, r2) && isequal_argsvec(v1, v2, full) && isequal_shapes(s1, s2) && t1 === t2
         end
     end
     if full && partial && !(Ta <: BSImpl.Const)
@@ -245,7 +268,7 @@ Manual dispatch on `hash` for common scalar types, avoiding dynamic dispatch whe
         push!(cur_expr.args, new_expr)
         cur_expr = new_expr
     end
-    
+
     push!(cur_expr.args, :(hash(a, h)::UInt))
     quote
         @nospecialize a
@@ -442,7 +465,7 @@ function hash_bsimpl(s::BSImpl.Type{T}, h::UInt, full) where {T}
             else
                 _unreachable()
             end
-            
+
             Base.hash(f, Base.hash(args, h))::UInt
         end
         BSImpl.AddMul(; coeff, dict, variant, shape, type, hash, hash2) => begin
@@ -467,7 +490,7 @@ function hash_bsimpl(s::BSImpl.Type{T}, h::UInt, full) where {T}
         BSImpl.ArrayMaker(; regions, values, shape, type, hash, hash2) => begin
             full && !iszero(hash2) && return hash2
             !full && !iszero(hash) && return hash
-            Base.hash(regions, Base.hash(values, Base.hash(shape, hash_maybe_fntype(type, h))))
+            hash_regions(regions, Base.hash(values, Base.hash(shape, hash_maybe_fntype(type, h))))
         end
     end
 
@@ -502,20 +525,20 @@ $(TYPEDSIGNATURES)
 
 Implements hash consing (flyweight design pattern) for `BasicSymbolic` objects.
 
-This function checks if an equivalent `BasicSymbolic` object already exists. It uses a 
-custom hash function (`hash2`) incorporating metadata and symtypes to search for existing 
-objects in a `WeakCacheSet` (`wcs`). Due to the possibility of hash collisions (where 
-different objects produce the same hash), a custom equality check (`isequal_with_metadata`) 
-which includes metadata comparison, is used to confirm the equivalence of objects with 
-matching hashes. If an equivalent object is found, the existing object is returned; 
-otherwise, the input `s` is returned. This reduces memory usage, improves compilation time 
-for runtime code generation, and supports built-in common subexpression elimination, 
+This function checks if an equivalent `BasicSymbolic` object already exists. It uses a
+custom hash function (`hash2`) incorporating metadata and symtypes to search for existing
+objects in a `WeakCacheSet` (`wcs`). Due to the possibility of hash collisions (where
+different objects produce the same hash), a custom equality check (`isequal_with_metadata`)
+which includes metadata comparison, is used to confirm the equivalence of objects with
+matching hashes. If an equivalent object is found, the existing object is returned;
+otherwise, the input `s` is returned. This reduces memory usage, improves compilation time
+for runtime code generation, and supports built-in common subexpression elimination,
 particularly when working with symbolic objects with metadata.
 
-Using a `WeakCacheSet` ensures that only weak references to `BasicSymbolic` objects are 
-stored, allowing objects that are no longer strongly referenced to be garbage collected. 
-Custom functions `hash2` and `isequal_with_metadata` are used instead of `Base.hash` and 
-`Base.isequal` to accommodate metadata without disrupting existing tests reliant on the 
+Using a `WeakCacheSet` ensures that only weak references to `BasicSymbolic` objects are
+stored, allowing objects that are no longer strongly referenced to be garbage collected.
+Custom functions `hash2` and `isequal_with_metadata` are used instead of `Base.hash` and
+`Base.isequal` to accommodate metadata without disrupting existing tests reliant on the
 original behavior of those functions.
 """
 
