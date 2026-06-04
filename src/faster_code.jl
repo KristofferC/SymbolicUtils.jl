@@ -801,10 +801,10 @@ const NARY_CALL_LIMIT = 12
 function codegen_function!(@nospecialize(op::Union{typeof(*), typeof(+)}), cs::CodegenState{T}, expr::BasicSymbolic{T}, expr_idx::Integer) where {T}
     if get(cs.rewrites, :sort_addmul, true)::Bool
         @assert isempty(cs.ir.non_canonical_idxs) "Sorted add/mul requires canonical IRStructure"
-        args_idxs = Int32[]
         sargs = sorted_arguments(expr)
-        for arg in sargs
-            push!(args_idxs, cs.ir[arg])
+        args_idxs = Vector{Int32}(undef, length(sargs))
+        for (i, arg) in enumerate(sargs)
+            args_idxs[i] = cs.ir[arg]
         end
         # For type-stability, so it matches with the other branch
         args_idxs = SymbolicUtils.AdjView{Int32}(args_idxs)
