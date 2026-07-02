@@ -549,7 +549,12 @@ function hash_bsimpl(s::BSImpl.Type{T}, h::UInt, full) where {T}
 end
 
 function Base.hash(s::BSImpl.Type, h::UInt)
-    hash_bsimpl(s, h, COMPARE_FULL[])
+    # Always use the partial (metadata-free) hash. This is a coarser hash than the
+    # `full = true` variant, which is valid for both comparison modes: objects equal
+    # under full comparison are necessarily equal under partial comparison, so they
+    # share a partial hash. Callers that need metadata-aware hashing must call
+    # `hash_bsimpl` explicitly. This avoids a task-local lookup on every hash.
+    hash_bsimpl(s, h, false)
 end
 
 const ENABLE_HASHCONSING = Ref(true)
